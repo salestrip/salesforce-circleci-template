@@ -1,0 +1,109 @@
+version: 2
+aliases:
+  # The ampersand character denotes an node anchor, this block can be referenced
+  # elsewhere by &name
+- &sfdx_version
+  name: SFDX Version
+  command: |
+    sfdx --version
+    sfdx plugins --core
+- &authorise_org
+  name: Authorise Org
+  command: |
+  # Note: Some $VARs are environment set (in CircleCI UI), others are set
+  # within this build script
+    sfdx force:auth:jwt:grant --clientid $CLIENT_ID \
+                              --jwtkeyfile /tmp/keys/jwt.key \
+                              --username $USERNAME \
+                              --setalias $ALIAS
+- &lint
+  name: Lint Lightning Components
+  command: sfdx force:lightning:lint ./salestrip --exit --json
+- &create_scratch
+  name: Create the Scratch Org
+  command: |
+    sfdx force:org:create --definitionfile $SCRATCH_ORG_DEF \
+                          --targetdevhubusername $ALIAS \
+                          --setalias circle_build_$CIRCLE_BUILD_NUM \
+                          --wait $DEPLOY_TIMEOUT
+    sfdx force:org:open --targetusername circle_build_$CIRCLE_BUILD_NUM \
+                        --urlonly
+- &deploy
+  name: Deploy to Salesforce
+  command: sfdx force:source:push --targetusername circle_build_$CIRCLE_BUILD_NUM
+- &install_package
+  name: Install Package
+  command: |
+    INSTALL_VER=$(jq -r '.result.MetadataPackageVersionId' /tmp/workspace/packageId.json)
+    sfdx force:package:install --package $INSTALL_VER \
+                               --noprompt \
+                               --publishwait $DEPLOY_TIMEOUT \
+                               --targetusername $TARGET_USERNAME \
+                               --wait $DEPLOY_TIMEOUT
+- &apex_tests
+  name: Run Apex Tests
+  command: |
+    sfdx force:apex:test:run --testlevel RunLocalTests \
+                             --resultformat junit \
+                             --outputdir /tmp/test-results \
+                             --targetusername circle_build_$CIRCLE_BUILD_NUM \
+                             --wait $DEPLOY_TIMEOUT \
+                             --codecoverage
+    sfdx force:data:soql:query --usetoolingapi \
+                               --query "SELECT PercentCovered FROM ApexOrgWideCoverage" \
+                               --targetusername circle_build_$CIRCLE_BUILD_NUM \
+                               --json > /tmp/test-results/orgCoverage.json
+    sfdx force:data:soql:query --usetoolingapi \
+                               --query "SELECT ApexClassorTrigger.Name, NumLinesCovered,NumLinesUncovered \
+                                          FROM ApexCodeCoverageAggregate \
+                                         WHERE NOT(ApexClassorTrigger.Name LIKE '%Test') \
+                                      ORDER BY ApexClassorTrigger.Name" \
+                               --targetusername circle_build_$CIRCLE_BUILD_NUM \
+                               --json > /tmp/test-results/classCoverage.json
+    ORG_COVERAGE=$(jq .result.records[0].PercentCovered /tmp/test-results/orgCoverage.json)
+    printf "%s%% code coverage" "$ORG_COVERAGE"
+    if [[ $ORG_COVERAGE -lt 80 ]]; then false; fi
+- &delete_scratch
+  name: Delete Scratch Org
+  command: |
+    sfdx force:org:delete --targetusername circle_build_$CIRCLE_BUILD_NUM \
+                          --targetdevhubusername DevHub \
+                          --noprompt
+  when: always
+- &image # A SFDX specific docker image we've open sourced
+  docker:
+  - image: salestrip/sfdx-cli
+- &build_job # This job combines other nodes above
+  <<: *image
+  steps:
+  - checkout
+  - run: *sfdx_version
+  - run: *setup_env
+  - run: *authorise_org
+  - run: *lint
+  - run: *create_scratch
+  - run: *inject_keys
+  - run: *deploy
+  - run: *apex_tests
+  - run: *delete_scratch
+  - store_test_results:
+      path: /tmp/test-results
+  - store_artifacts:
+      path: /tmp/test-results
+jobs:
+  build_and_test:
+    <<: *build_job
+    environment:
+      ALIAS: DevHub
+      SCRATCH_ORG_DEF: environments/scratch-defs/default-scratch-def.json
+# Workflows combine jobs AKA pipelines in other CI tools
+workflows:
+  version: 2
+  SalesTrip:
+    jobs: # There is only one job below but you could include more
+    - build_and_test:
+        filters:
+          branches:
+            ignore:
+            - uat
+            - master

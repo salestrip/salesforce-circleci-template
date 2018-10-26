@@ -1,0 +1,11 @@
+{
+  "orgName": "SalesTrip",
+  "country": "GB",
+  "adminEmail": "noreply@salestrip.com",
+  "edition": "Developer",
+  "orgPreferences": {
+    "enabled": [
+      "S1DesktopEnabled"
+    ]
+  }
+}
